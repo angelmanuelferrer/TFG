@@ -160,6 +160,36 @@ Documento vivo con todas las decisiones de diseño del sistema GEO-Audit, sus ju
 
 ---
 
+## ADR-009: Discovery con modelos web-grounded (no chat puro)
+
+**Fecha**: 2026-02-16
+**Estado**: Aprobado e implementado (2026-02-22)
+
+**Contexto**: El `CompetitorFinder` original usaba `ChatOpenAI` y `ChatGoogleGenerativeAI` como chat puro. Estos modelos NO tienen acceso a web — las URLs que citan son de memoria (training data) y pueden ser alucinadas o inexistentes. Esto invalida el descubrimiento de competidores porque no refleja lo que un usuario real obtendria al preguntar a un chatbot.
+
+**Problema detectado**: El objetivo del discovery es replicar exactamente la experiencia de un usuario preguntando a un chatbot. Los modelos via API sin grounding no reproducen esa experiencia porque carecen de busqueda web.
+
+**Decision**: Usar **Claude (Anthropic) con `web_search` tool** (`web_search_20250305`). La API de Anthropic ejecuta busquedas web reales del lado del servidor y devuelve URLs verificadas con citas estructuradas.
+
+**Implementacion**:
+- SDK: `anthropic` (directo, sin LangChain)
+- Modelo: `claude-sonnet-4-5-20250929`
+- Tool: `web_search_20250305` con `max_uses=5` por query
+- Localizacion: `country=ES`, `timezone=Europe/Madrid`
+- Extraccion de URLs: prioriza `citations` del web search (verificadas) sobre URLs en texto
+
+**Justificacion**:
+- Claude con web search busca en la web real y cita fuentes verificadas, no alucinadas.
+- Las citas vienen estructuradas en la respuesta (`web_search_result_location`), no dependen de regex.
+- El `user_location` permite localizar resultados a España, relevante para el caso de estudio.
+- Coste: ~$10/1000 busquedas + tokens. Para 15 queries x ~3 busquedas = ~$0.45.
+
+**Alternativa descartada**: Gemini con `google_search` tool + Perplexity API. Rechazado porque requiere mantener dos APIs distintas y Perplexity no ofrece el mismo nivel de control sobre las citas.
+
+**Alternativa descartada**: Tavily (buscador web para agentes). Rechazado en ADR-004 porque busca en la web tradicional, no en motores generativos.
+
+---
+
 ## Indice de decisiones
 
 | ADR | Titulo | Estado |
@@ -172,3 +202,4 @@ Documento vivo con todas las decisiones de diseño del sistema GEO-Audit, sus ju
 | 006 | Separacion discovery vs runs | Aprobado |
 | 007 | Procesamiento HTML-aware | Aprobado |
 | 008 | Ejecucion Kaggle, desarrollo local | Aprobado |
+| 009 | Discovery con modelos web-grounded (Anthropic) | Aprobado |
