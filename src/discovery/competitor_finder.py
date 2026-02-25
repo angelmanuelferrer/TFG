@@ -1,8 +1,9 @@
 """Discover real competitors by querying Claude with web search.
 
-Asks the 15 fixed queries to Claude (with web search enabled), extracts the URLs
-it cites, and ranks them by frequency. The result is saved as frozen_competitors.json
-and used as the fixed competitor set for all experimental runs.
+Asks the discovery queries (informational + comparative, no navigational) to Claude
+with web search enabled, extracts the URLs it cites, and ranks them by domain
+frequency. The result is saved as frozen_competitors.json and used as the fixed
+competitor set for all experimental runs.
 See ADR-004 and ADR-009 in docs/DECISIONS.md.
 """
 
@@ -12,7 +13,7 @@ import json
 import logging
 import re
 import time
-from collections import Counter
+from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -35,6 +36,10 @@ _EXCLUDED_DOMAINS = {
     "github.com",
 }
 
+# Citation URLs get more weight than text-extracted URLs
+_CITATION_WEIGHT = 2
+_TEXT_WEIGHT = 1
+
 
 class CompetitorFinder:
     """Queries Claude with web search to discover which sources it cites."""
@@ -46,6 +51,9 @@ class CompetitorFinder:
             config = load_experiment_config()
 
         self.config = config
+        self._target_domain = (
+            urlparse(config["target_url"]).netloc.replace("www.", "")
+        )
         live = config.get("live_evaluation", {})
         self._claude_model = live.get("claude_model", "claude-sonnet-4-5-20250929")
         self._client = None
@@ -62,17 +70,17 @@ class CompetitorFinder:
         Parameters
         ----------
         queries : list of str
-            The queries to send to Claude.
+            The queries to send to Claude (should be discovery queries only,
+            i.e. informational + comparative, no navigational).
         delay : float
             Seconds to wait between API calls (rate limiting).
 
         Returns
         -------
-        dict with keys: discovery_date, engines_used, per_query, aggregated_urls,
-        top_competitors.
+        dict with keys: discovery_date, engines_used, n_queries, per_query,
+        aggregated_domains, top_competitors.
         """
         per_query: Dict[str, Dict[str, Any]] = {}
-        all_urls: List[str] = []
 
         for i, query in enumerate(queries):
             logger.info("Query %d/%d: %s", i + 1, len(queries), query[:60])
@@ -80,7 +88,7 @@ class CompetitorFinder:
             result = self._query_claude(query)
             text_urls = self._extract_urls(result["text"])
 
-            # Citation URLs come from web search citations (higher quality)
+            # Citation URLs come from web search citations (verified, higher weight)
             citation_urls = []
             for u in result.get("citation_urls", []):
                 cleaned = self._clean_url(u)
@@ -98,20 +106,20 @@ class CompetitorFinder:
                     "citation_urls": citation_urls,
                 }
             }
-            all_urls.extend(combined)
 
             if i < len(queries) - 1:
                 time.sleep(delay)
 
-        # Aggregate
-        aggregated = self._aggregate_urls(all_urls, per_query)
+        # Aggregate by domain with weighted scoring
+        aggregated = self._aggregate_by_domain(per_query)
 
         return {
             "discovery_date": datetime.now().isoformat(),
             "engines_used": ["claude"],
+            "n_queries": len(queries),
             "per_query": per_query,
-            "aggregated_urls": aggregated,
-            "top_competitors": [u["url"] for u in aggregated[:15]],
+            "aggregated_domains": aggregated,
+            "top_competitors": [d["domain"] for d in aggregated[:15]],
         }
 
     def save_results(self, results: Dict[str, Any], output_path: str) -> None:
@@ -196,14 +204,18 @@ class CompetitorFinder:
             return {"text": "", "search_urls": [], "citation_urls": []}
 
     # ------------------------------------------------------------------
-    # URL extraction
+    # URL extraction & aggregation
     # ------------------------------------------------------------------
+
+    def _get_domain(self, url: str) -> str:
+        """Extract clean domain from URL."""
+        return urlparse(url).netloc.replace("www.", "")
 
     def _clean_url(self, url: str) -> Optional[str]:
         """Clean a URL and return None if it should be excluded."""
         url = _TRAILING_PUNCT.sub("", url).rstrip("/")
-        domain = urlparse(url).netloc.replace("www.", "")
-        if domain in _EXCLUDED_DOMAINS or not domain:
+        domain = self._get_domain(url)
+        if domain in _EXCLUDED_DOMAINS or domain == self._target_domain or not domain:
             return None
         return url
 
@@ -226,30 +238,60 @@ class CompetitorFinder:
 
         return cleaned
 
-    def _aggregate_urls(
-        self,
-        all_urls: List[str],
-        per_query: Dict[str, Dict[str, Any]],
+    def _aggregate_by_domain(
+        self, per_query: Dict[str, Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Rank URLs by frequency and annotate with query appearances."""
-        freq = Counter(all_urls)
-        # Map URL -> list of queries where it appeared
-        url_queries: Dict[str, List[str]] = {}
-        for query, data in per_query.items():
-            for url in data.get("claude", {}).get("urls_cited", []):
-                url_queries.setdefault(url, [])
-                if query not in url_queries[url]:
-                    url_queries[url].append(query)
+        """Aggregate URLs by domain with weighted scoring.
 
+        Scoring: citation URLs count 2 points, text-only URLs count 1.
+        A domain can only score once per query (max weight for that query).
+        """
+        # domain -> {score, queries, urls}
+        domains: Dict[str, Dict[str, Any]] = defaultdict(
+            lambda: {"score": 0, "queries": [], "urls": set(), "citation_count": 0}
+        )
+
+        for query, data in per_query.items():
+            claude_data = data.get("claude", {})
+            citation_urls = set(claude_data.get("citation_urls", []))
+            all_urls = claude_data.get("urls_cited", [])
+
+            # Track best weight per domain for this query (avoid double counting)
+            domain_best_weight: Dict[str, int] = {}
+
+            for url in all_urls:
+                domain = self._get_domain(url)
+                if not domain:
+                    continue
+
+                weight = _CITATION_WEIGHT if url in citation_urls else _TEXT_WEIGHT
+                domain_best_weight[domain] = max(
+                    domain_best_weight.get(domain, 0), weight
+                )
+                domains[domain]["urls"].add(url)
+
+                if url in citation_urls:
+                    domains[domain]["citation_count"] += 1
+
+            # Apply scores per domain (one score per query)
+            for domain, weight in domain_best_weight.items():
+                domains[domain]["score"] += weight
+                if query not in domains[domain]["queries"]:
+                    domains[domain]["queries"].append(query)
+
+        # Sort by score descending, then by query count
         aggregated = []
-        for url, count in freq.most_common():
-            domain = urlparse(url).netloc.replace("www.", "")
+        for domain, info in sorted(
+            domains.items(), key=lambda x: (x[1]["score"], len(x[1]["queries"])), reverse=True
+        ):
             aggregated.append(
                 {
-                    "url": url,
                     "domain": domain,
-                    "frequency": count,
-                    "queries_appeared_in": url_queries.get(url, []),
+                    "score": info["score"],
+                    "n_queries": len(info["queries"]),
+                    "citation_count": info["citation_count"],
+                    "urls": sorted(info["urls"]),
+                    "queries_appeared_in": info["queries"],
                 }
             )
 
