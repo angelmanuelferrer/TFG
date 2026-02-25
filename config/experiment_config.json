@@ -35,13 +35,6 @@
     "search_type": "similarity"
   },
 
-  "competitors": [
-    "code.org",
-    "scratch.mit.edu",
-    "codelearn.es",
-    "campustecnologico.es"
-  ],
-
   "live_evaluation": {
     "engines": ["claude"],
     "claude_model": "claude-sonnet-4-5-20250929"
