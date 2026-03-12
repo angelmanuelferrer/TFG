@@ -157,7 +157,17 @@ PAWC penaliza aparecer solo al final con poco texto y recompensa aparecer pronto
 
 ### Implementación
 
-PAWC se calcula a nivel de pipeline (no en `CitationExtractor` directamente) combinando los datos de `first_citation_rank` con el recuento de palabras de las citas del objetivo. El cálculo utiliza los campos `quote` de cada cita que matchea el target.
+```python
+# src/rag/citation_extractor.py — CitationExtractor._calculate_pawc()
+sorted_cits = sorted(citations, key=lambda c: c.get("index", 0))
+pawc = 0.0
+for position, cit in enumerate(sorted_cits, start=1):
+    if self._url_matches_target(cit.get("url", "")):
+        word_count = len(cit.get("quote", "").split())
+        pawc += word_count / math.log2(position + 1)
+```
+
+Se calcula dentro de `CitationExtractor.extract_metrics()` usando los campos `quote` e `index` de cada cita que matchea el target.
 
 ---
 
@@ -223,9 +233,18 @@ En modo agent del RAG Simulator, "recuperado" significa que el agente buscó y o
 
 ### Implementación
 
-Citation Rate requiere datos de retrieval (qué chunks fueron recuperados) además de citación. En modo agent, el RAG Judge reporta `sources_available_but_unused` en su JSON de salida, lo que permite calcular:
+```python
+# src/rag/citation_extractor.py — CitationExtractor._calculate_citation_rate()
+all_sources = sources_used + sources_available_but_unused
+target_retrieved = sum(1 for u in all_sources if self._url_matches_target(u))
+target_cited = self._count_target_citations(citations)
+citation_rate = (target_cited / target_retrieved) * 100
+```
+
+Se calcula dentro de `CitationExtractor.extract_metrics()`. En modo agent, el RAG Judge reporta `sources_available_but_unused` en su JSON de salida, lo que permite calcular:
 - Recuperado = `sources_used` + `sources_available_but_unused`
 - Citado = entradas en `citations` que matchean el target
+- Devuelve `None` si el target no fue recuperado (no aplica)
 
 ---
 
@@ -253,7 +272,7 @@ Clasificación categórica del fragmento de respuesta que menciona al objetivo. 
 
 ### Implementación
 
-Configurado en `src/prompts/registry.py` (prompt `sentiment_analyzer`, v0.1.0). Modelo: Ollama local (clasificación simple que no requiere modelos de pago). Clasificación ternaria: POSITIVO / NEUTRO / NEGATIVO.
+Configurado en `src/prompts/registry.py` (prompt `sentiment_analyzer`, v0.1.0). Modelo: pendiente de implementación (Fase 2). Clasificación ternaria: POSITIVO / NEUTRO / NEGATIVO.
 
 ---
 
