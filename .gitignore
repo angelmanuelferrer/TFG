@@ -70,3 +70,6 @@ data/target_vectorstore_cache/
 
 # Internal context (not for public)
 /contexto-interno
+
+# Material de referencia de terceros (no se publica)
+docs/tfg_manuel_canizares.md
