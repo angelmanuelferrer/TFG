@@ -5,7 +5,7 @@ Equivalent to notebooks/experimental_run.ipynb but runs from terminal.
 Loads frozen vectorstore, re-embeds only the target, then runs RAG Judge
 for each query and computes GEO metrics.
 
-Requires EMBEDDING_SERVER_URL and EMBEDDING_SERVER_TOKEN in .env (Kaggle GPU server).
+Requires GOOGLE_API_KEY in .env (RAG Judge + embeddings via Google API).
 
 Usage:
     python scripts/run_experimental.py [--block R1|R2|R3|R4]
